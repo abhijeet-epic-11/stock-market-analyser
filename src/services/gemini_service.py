@@ -1,0 +1,94 @@
+import asyncio
+import json
+import logging
+import re
+
+from pydantic import ValidationError
+
+from src.schemas.analysis import MarketSnapshot, NewsAnalysis, TechnicalAnalysis
+from src.schemas.planner import AnalysisPlan
+from src.schemas.recommendation import Recommendation
+
+logger = logging.getLogger(__name__)
+
+
+class GeminiService:
+    def __init__(self, api_key: str | None, model: str) -> None:
+        self.api_key = api_key
+        self.model = model
+        self._client = None
+        if api_key:
+            try:
+                from google import genai
+
+                self._client = genai.Client(api_key=api_key)
+            except Exception:
+                self._client = None
+
+    async def generate_plan(self, query: str) -> AnalysisPlan | None:
+        prompt = (
+            "You are a stock analysis planner. Convert the user query into strict JSON "
+            "matching this schema: ticker string, horizon one of "
+            "1_month|3_months|6_months|1_year|2_years|5_years, tasks array containing "
+            "market, technical, news, thesis when useful. Do not recommend.\n"
+            f"User query: {query}"
+        )
+        return await asyncio.to_thread(self._generate_model, prompt, AnalysisPlan)
+
+    async def generate_news_analysis(self, ticker: str, raw_news: NewsAnalysis) -> NewsAnalysis | None:
+        prompt = (
+            "You are a news analysis agent. Interpret the headlines as strict JSON matching "
+            "this schema: sentiment bullish|bearish|neutral|unknown, score 0-100, "
+            "articles as provided, events as the key market-moving events. "
+            "Do not make a stock recommendation.\n"
+            f"Ticker: {ticker}\n"
+            f"News: {raw_news.model_dump_json()}"
+        )
+        return await asyncio.to_thread(self._generate_model, prompt, NewsAnalysis)
+
+    async def generate_recommendation(
+        self,
+        market: MarketSnapshot,
+        technical: TechnicalAnalysis,
+        news: NewsAnalysis | None,
+    ) -> Recommendation | None:
+        prompt = (
+            "You are a thesis and synthesizer agent. Create a final report as strict JSON "
+            "matching this schema: recommendation BUY|HOLD|SELL, confidence 0-100, "
+            "bullish_factors string array, bearish_factors string array, key_risks string array, "
+            "thesis string. Use the market, technical, and news inputs only.\n"
+            f"Market: {market.model_dump_json()}\n"
+            f"Technical: {technical.model_dump_json()}\n"
+            f"News: {news.model_dump_json() if news else None}\n"
+        )
+        return await asyncio.to_thread(self._generate_model, prompt, Recommendation)
+
+    def _generate_model(self, prompt: str, model_type):
+        if self._client is None:
+            return None
+        try:
+            response = self._client.models.generate_content(model=self.model, contents=prompt)
+            text = getattr(response, "text", None)
+            if not text:
+                return None
+            payload = self._extract_json(text)
+            return model_type.model_validate(payload)
+        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
+            logger.warning("Gemini returned invalid %s payload: %s", model_type.__name__, exc)
+            return None
+        except Exception as exc:
+            logger.warning("Gemini request failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _extract_json(text: str) -> dict:
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
+            cleaned = re.sub(r"```$", "", cleaned).strip()
+        if not cleaned.startswith("{"):
+            match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+            if not match:
+                raise ValueError("No JSON object found in Gemini response.")
+            cleaned = match.group(0)
+        return json.loads(cleaned)
