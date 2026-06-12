@@ -1,12 +1,17 @@
 import asyncio
+import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 import yfinance as yf
 
 from src.schemas.analysis import MarketSnapshot, PriceBar
 from src.services.yfinance_client import configure_yfinance_cache
+
+logger = logging.getLogger(__name__)
+
+SymbolResolver = Callable[[str, str | None], str | None]
 
 
 class MarketDataError(RuntimeError):
@@ -23,9 +28,15 @@ class MarketService:
         "5_years": "5y",
     }
 
-    def __init__(self, interval: str = "1d", default_exchange_suffix: str | None = ".NS") -> None:
+    def __init__(
+        self,
+        interval: str = "1d",
+        default_exchange_suffix: str | None = ".NS",
+        symbol_resolver: SymbolResolver | None = None,
+    ) -> None:
         self.interval = interval
         self.default_exchange_suffix = default_exchange_suffix
+        self.symbol_resolver = symbol_resolver
 
     async def get_stock_snapshot(self, ticker: str, horizon: str) -> MarketSnapshot:
         return await asyncio.to_thread(self._get_stock_snapshot_sync, ticker, horizon)
@@ -68,14 +79,61 @@ class MarketService:
 
     def _load_history(self, ticker: str, period: str):
         errors: list[str] = []
-        for candidate in self._ticker_candidates(ticker):
-            yahoo_ticker = yf.Ticker(candidate)
-            history = yahoo_ticker.history(period=period, interval=self.interval, auto_adjust=False)
-            if not history.empty:
-                return yahoo_ticker, candidate, history
-            errors.append(candidate)
+
+        def attempt(candidates):
+            for candidate in candidates:
+                if not candidate or candidate in errors:
+                    continue
+                yahoo_ticker = yf.Ticker(candidate)
+                history = yahoo_ticker.history(period=period, interval=self.interval, auto_adjust=False)
+                if not history.empty:
+                    return yahoo_ticker, candidate, history
+                errors.append(candidate)
+            return None
+
+        # 1. Try the literal input and its exchange-suffix variants (fast, no API call).
+        result = attempt(self._ticker_candidates(ticker))
+        if result:
+            return result
+
+        # 2. The input may be a company name (e.g. "INFOSYS"). Ask the LLM to resolve it
+        #    to a proper Yahoo symbol, then validate that symbol against live data.
+        result = attempt(self._llm_candidates(ticker))
+        if result:
+            return result
+
+        # 3. Last resort: Yahoo's own search endpoint.
+        result = attempt(self._search_candidates(ticker))
+        if result:
+            return result
+
         attempted = ", ".join(errors)
         raise MarketDataError(f"No market data found for ticker '{ticker}'. Tried: {attempted}.")
+
+    def _llm_candidates(self, ticker: str) -> list[str]:
+        if self.symbol_resolver is None:
+            return []
+        try:
+            symbol = self.symbol_resolver(ticker, self.default_exchange_suffix)
+        except Exception as exc:
+            logger.warning("LLM symbol resolution failed for '%s': %s", ticker, exc)
+            return []
+        if not symbol:
+            return []
+        logger.info("LLM resolved '%s' -> '%s'", ticker, symbol)
+        return [symbol.strip().upper()]
+
+    def _search_candidates(self, ticker: str) -> list[str]:
+        try:
+            quotes = yf.Search(ticker.strip(), max_results=8).quotes
+        except Exception:
+            return []
+        symbols = [q.get("symbol") for q in quotes if q.get("symbol")]
+        suffix = (self.default_exchange_suffix or "").upper()
+        # Prefer symbols on the configured default exchange (e.g. .NS for NSE).
+        preferred = [s for s in symbols if suffix and s.upper().endswith(suffix)]
+        ordered = preferred + [s for s in symbols if s not in preferred]
+        return list(dict.fromkeys(ordered))
 
     def _ticker_candidates(self, ticker: str) -> list[str]:
         normalized = ticker.strip().upper()

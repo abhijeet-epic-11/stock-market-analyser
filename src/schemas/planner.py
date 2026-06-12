@@ -7,6 +7,20 @@ Horizon = Literal["1_month", "3_months", "6_months", "1_year", "2_years", "5_yea
 TaskName = Literal["market", "technical", "news", "thesis"]
 
 
+class TickerResolution(BaseModel):
+    """LLM-proposed Yahoo Finance symbol for a fuzzy company name or ticker."""
+
+    symbol: str = Field(..., min_length=1, max_length=20, examples=["INFY.NS"])
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_symbol(cls, value: str) -> str:
+        cleaned = value.strip().upper()
+        if not cleaned:
+            raise ValueError("symbol cannot be empty")
+        return cleaned
+
+
 class StockAnalysisRequest(BaseModel):
     ticker: str = Field(..., min_length=1, max_length=20, examples=["TCS"])
     horizon: Horizon = "6_months"

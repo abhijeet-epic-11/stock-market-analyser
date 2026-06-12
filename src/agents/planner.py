@@ -2,7 +2,7 @@ import logging
 import re
 
 from src.schemas.planner import AnalysisPlan, StockAnalysisRequest
-from src.services.gemini_service import GeminiService
+from src.services.llm_service import LLMService
 
 logger = logging.getLogger(__name__)
 
@@ -23,17 +23,17 @@ class PlannerAgent:
         "five years": "5_years",
     }
 
-    def __init__(self, gemini: GeminiService) -> None:
-        self.gemini = gemini
+    def __init__(self, llm: LLMService) -> None:
+        self.llm = llm
 
     async def run(self, query: str | StockAnalysisRequest) -> AnalysisPlan:
         logger.info("Planner analysis started")
         if isinstance(query, StockAnalysisRequest):
             request = query
         else:
-            gemini_plan = await self.gemini.generate_plan(query)
-            if gemini_plan is not None:
-                return self._normalize_plan(gemini_plan)
+            llm_plan = await self.llm.generate_plan(query)
+            if llm_plan is not None:
+                return self._normalize_plan(llm_plan)
             request = self._parse_query(query)
 
         return AnalysisPlan(

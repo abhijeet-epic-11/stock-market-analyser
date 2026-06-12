@@ -6,22 +6,29 @@ import re
 from pydantic import ValidationError
 
 from src.schemas.analysis import MarketSnapshot, NewsAnalysis, TechnicalAnalysis
-from src.schemas.planner import AnalysisPlan
+from src.schemas.planner import AnalysisPlan, TickerResolution
 from src.schemas.recommendation import Recommendation
 
 logger = logging.getLogger(__name__)
 
 
-class GeminiService:
+class LLMService:
+    """OpenAI-backed LLM service for planning, resolution, and synthesis.
+
+    All prompts ask for strict JSON and the responses are validated against the
+    relevant Pydantic schema. Any failure (missing key, API error, invalid payload)
+    degrades gracefully to ``None`` so callers can fall back to deterministic logic.
+    """
+
     def __init__(self, api_key: str | None, model: str) -> None:
         self.api_key = api_key
         self.model = model
         self._client = None
         if api_key:
             try:
-                from google import genai
+                from openai import OpenAI
 
-                self._client = genai.Client(api_key=api_key)
+                self._client = OpenAI(api_key=api_key)
             except Exception:
                 self._client = None
 
@@ -31,9 +38,38 @@ class GeminiService:
             "matching this schema: ticker string, horizon one of "
             "1_month|3_months|6_months|1_year|2_years|5_years, tasks array containing "
             "market, technical, news, thesis when useful. Do not recommend.\n"
+            "The ticker MUST be the exact Yahoo Finance symbol including the correct exchange "
+            "suffix, not the company name. Examples: Infosys -> INFY.NS, Reliance -> RELIANCE.NS, "
+            "Apple -> AAPL, Toyota -> 7203.T, HSBC -> HSBA.L. Use no suffix for US listings.\n"
             f"User query: {query}"
         )
         return await asyncio.to_thread(self._generate_model, prompt, AnalysisPlan)
+
+    def resolve_symbol(self, query: str, default_exchange_suffix: str | None = None) -> str | None:
+        """Resolve a fuzzy company name or ticker into a Yahoo Finance symbol.
+
+        Synchronous so it can be called from within MarketService's worker thread.
+        Returns None when the LLM is unavailable or cannot produce a valid symbol;
+        callers should validate the symbol against live market data.
+        """
+        if self._client is None:
+            return None
+        suffix_hint = ""
+        if default_exchange_suffix:
+            suffix_hint = (
+                f"If the company is listed on the exchange for the '{default_exchange_suffix}' "
+                f"suffix, prefer that listing.\n"
+            )
+        prompt = (
+            "You map a company name or ticker to its exact Yahoo Finance symbol, including "
+            "the correct exchange suffix. Examples: Infosys -> INFY.NS, Reliance -> RELIANCE.NS, "
+            "Apple -> AAPL, Toyota -> 7203.T, HSBC -> HSBA.L. Use no suffix for US listings.\n"
+            f"{suffix_hint}"
+            'Return strict JSON: {"symbol": "<yahoo_symbol>"}.\n'
+            f"Input: {query}"
+        )
+        resolution = self._generate_model(prompt, TickerResolution)
+        return resolution.symbol if resolution else None
 
     async def generate_news_analysis(self, ticker: str, raw_news: NewsAnalysis) -> NewsAnalysis | None:
         prompt = (
@@ -67,17 +103,21 @@ class GeminiService:
         if self._client is None:
             return None
         try:
-            response = self._client.models.generate_content(model=self.model, contents=prompt)
-            text = getattr(response, "text", None)
+            response = self._client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+            )
+            text = response.choices[0].message.content
             if not text:
                 return None
             payload = self._extract_json(text)
             return model_type.model_validate(payload)
         except (ValidationError, json.JSONDecodeError, ValueError) as exc:
-            logger.warning("Gemini returned invalid %s payload: %s", model_type.__name__, exc)
+            logger.warning("LLM returned invalid %s payload: %s", model_type.__name__, exc)
             return None
         except Exception as exc:
-            logger.warning("Gemini request failed: %s", exc)
+            logger.warning("LLM request failed: %s", exc)
             return None
 
     @staticmethod
@@ -89,6 +129,6 @@ class GeminiService:
         if not cleaned.startswith("{"):
             match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
             if not match:
-                raise ValueError("No JSON object found in Gemini response.")
+                raise ValueError("No JSON object found in LLM response.")
             cleaned = match.group(0)
         return json.loads(cleaned)

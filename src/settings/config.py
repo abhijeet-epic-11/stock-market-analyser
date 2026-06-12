@@ -14,8 +14,8 @@ class Settings(BaseSettings):
     app_name: str = "Stock Market Analyser"
     environment: str = Field(default="development")
 
-    gemini_api_key: str | None = None
-    gemini_model: str = "gemini-2.5-flash"
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-4o-mini"
 
     default_horizon: str = "6_months"
     yfinance_interval: str = "1d"

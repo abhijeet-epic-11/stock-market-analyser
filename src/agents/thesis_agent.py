@@ -2,14 +2,14 @@ import logging
 
 from src.schemas.analysis import MarketSnapshot, NewsAnalysis, TechnicalAnalysis
 from src.schemas.recommendation import Recommendation
-from src.services.gemini_service import GeminiService
+from src.services.llm_service import LLMService
 
 logger = logging.getLogger(__name__)
 
 
 class ThesisAgent:
-    def __init__(self, gemini: GeminiService) -> None:
-        self.gemini = gemini
+    def __init__(self, llm: LLMService) -> None:
+        self.llm = llm
 
     async def run(
         self,
@@ -19,9 +19,9 @@ class ThesisAgent:
         market_notes: list[str] | None = None,
     ) -> Recommendation:
         logger.info("Thesis generation started for %s", market.ticker)
-        gemini_recommendation = await self.gemini.generate_recommendation(market, technical, news)
-        if gemini_recommendation is not None:
-            return gemini_recommendation
+        llm_recommendation = await self.llm.generate_recommendation(market, technical, news)
+        if llm_recommendation is not None:
+            return llm_recommendation
 
         score = technical.score
         bullish = list(technical.bullish_factors)

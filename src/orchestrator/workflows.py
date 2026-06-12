@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 
@@ -8,7 +9,7 @@ from src.agents.technical_agent import TechnicalAgent
 from src.agents.thesis_agent import ThesisAgent
 from src.schemas.planner import StockAnalysisRequest
 from src.schemas.recommendation import AnalysisResponse
-from src.services.gemini_service import GeminiService
+from src.services.llm_service import LLMService
 from src.services.market_service import MarketService
 from src.services.news_service import NewsService
 from src.settings.config import Settings
@@ -19,17 +20,18 @@ logger = logging.getLogger(__name__)
 class AnalysisWorkflow:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.gemini = GeminiService(settings.gemini_api_key, settings.gemini_model)
-        self.planner = PlannerAgent(self.gemini)
+        self.llm = LLMService(settings.openai_api_key, settings.openai_model)
+        self.planner = PlannerAgent(self.llm)
         self.market_service = MarketService(
             interval=settings.yfinance_interval,
             default_exchange_suffix=settings.default_exchange_suffix,
+            symbol_resolver=self.llm.resolve_symbol,
         )
         self.news_service = NewsService()
         self.market_agent = MarketAgent()
         self.technical_agent = TechnicalAgent()
-        self.news_agent = NewsAgent(self.gemini)
-        self.thesis_agent = ThesisAgent(self.gemini)
+        self.news_agent = NewsAgent(self.llm)
+        self.thesis_agent = ThesisAgent(self.llm)
 
     async def execute(self, query: str | StockAnalysisRequest) -> AnalysisResponse:
         logger.info("Analysis workflow started")
